@@ -454,15 +454,32 @@ def provider_spotify(query: str) -> List[str]:
 
 
 def provider_soundcloud(query: str) -> List[str]:
+    """
+    Primary: query SoundCloud API using SOUNDCLOUD_CLIENT_ID (if present).
+    Fallback: if no client id is configured, use Google CSE restricted to site:soundcloud.com.
+    """
     cid = config.get("SOUNDCLOUD_CLIENT_ID")
     if not cid:
-        logger.debug("☁️ SoundCloud provider skipped (missing client id).")
-        return []
+        logger.debug(
+            "☁️ SoundCloud client id missing; falling back to Google (site:soundcloud.com) for query: %s",
+            query,
+        )
+        try:
+            # Reuse provider_google to search only within soundcloud.com
+            return provider_google(f"{query} site:soundcloud.com")
+        except Exception as exc:
+            logger.warning(
+                "☁️ ❌ SoundCloud → Google fallback error for query %s: %s", query, exc
+            )
+            return []
+
+    # If we have a client id, use the SoundCloud API as before
     try:
         r = requests.get(
             "https://api.soundcloud.com/tracks",
             params={"q": query, "client_id": cid, "limit": 5},
             timeout=10,
+            headers={"User-Agent": USER_AGENT},
         )
         r.raise_for_status()
         tracks = r.json()
