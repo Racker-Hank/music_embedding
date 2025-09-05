@@ -36,6 +36,7 @@ def get_executable_directory() -> str:
 folder = get_executable_directory()
 CONFIG_FILE = os.path.join(folder, "conf/config.json")
 CACHE_FILE = os.path.join(folder, "data/artwork_cache.json")
+DOTENV_FILE = os.path.join(folder, ".env")
 
 DEFAULT_CONFIG = {
     "ENABLED_PROVIDERS": [
@@ -63,7 +64,7 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
-    load_dotenv()
+    load_dotenv(dotenv_path=DOTENV_FILE)
 
     cfg = DEFAULT_CONFIG.copy()
 
