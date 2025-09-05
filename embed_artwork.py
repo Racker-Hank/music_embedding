@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import sys
+import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
@@ -15,7 +16,7 @@ from mutagen.id3 import APIC, ID3
 from mutagen.id3 import error as ID3Error
 from mutagen.mp3 import MP3
 from mutagen.wave import WAVE
-from PIL import Image
+from PIL import Image, ImageTk, UnidentifiedImageError
 from tqdm import tqdm
 
 # ============== CONFIG & LOGGING ==============
@@ -60,7 +61,14 @@ DEFAULT_CONFIG = {
     "SPOTIFY_CLIENT_SECRET": "",
     "SOUNDCLOUD_CLIENT_ID": "",
     "LOG_LEVEL": "INFO",
+    "USE_CACHE": True,
 }
+
+# A polite browser-like user agent to avoid 403s from some CDNs
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36"
+)
 
 
 def load_config() -> dict:
@@ -79,9 +87,9 @@ def load_config() -> dict:
         env_val = os.getenv(key)
         if env_val is not None:
             # Cast certain values
-            if env_val.lower() in ("true", "false"):
+            if isinstance(env_val, str) and env_val.lower() in ("true", "false"):
                 cfg[key] = env_val.lower() == "true"
-            elif env_val.isdigit():
+            elif isinstance(env_val, str) and env_val.isdigit():
                 cfg[key] = int(env_val)
             else:
                 cfg[key] = env_val
@@ -93,6 +101,10 @@ def load_config() -> dict:
         cfg["FILE_ACTION"] = "copy"
     else:
         cfg["FILE_ACTION"] = action
+
+    # Normalize LOG_LEVEL name to expected key used below
+    if "LOG_LEVEL" not in cfg and "LOG_LEVEL" in cfg:
+        cfg["LOG_LEVEL"] = cfg.get("LOG_LEVEL", "INFO")
 
     return cfg
 
@@ -114,6 +126,7 @@ else:
 
 
 def save_cache():
+    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
     with open(CACHE_FILE, "w", encoding="utf-8") as fobj:
         json.dump(cache, fobj, indent=2)
 
@@ -133,12 +146,13 @@ def clean_query(filename: str) -> str:
 
 def fetch_image(url: str) -> Optional[Tuple[str, bytes, Tuple[int, int], str]]:
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=10, headers={"User-Agent": USER_AGENT})
         r.raise_for_status()
         img = Image.open(io.BytesIO(r.content))
         w, h = img.size
         fmt = (img.format or "JPEG").upper()
         mime = "image/jpeg" if fmt == "JPEG" else "image/%s" % fmt.lower()
+        # verify content is image (verify may close the image so we only used it to confirm)
         img.verify()
         return (url, r.content, (w, h), mime)
     except Exception as exc:
@@ -162,6 +176,109 @@ def filter_and_order_candidates(
     return valid
 
 
+def preview_with_tkinter(image_bytes: bytes) -> bool:
+    """
+    Display image with Tkinter and ask user to choose yes/no.
+    Shows original resolution under the preview.
+    Grabs focus until input is given, then returns focus to console.
+    Returns True if approved, False otherwise.
+    """
+    decision = {"value": None}
+
+    def approve(event=None):
+        decision["value"] = True
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    def reject(event=None):
+        decision["value"] = False
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    # Create root window
+    root = tk.Tk()
+    root.title("Artwork Preview")
+
+    # Bring window to front and grab focus
+    try:
+        root.lift()
+        root.attributes("-topmost", True)
+        root.focus_force()
+        root.grab_set()  # Force all events to this window
+    except Exception:
+        pass
+
+    # Load PIL image and capture original resolution
+    try:
+        pil_img = Image.open(io.BytesIO(image_bytes))
+    except UnidentifiedImageError:
+        return False
+
+    orig_w, orig_h = pil_img.size
+
+    # Resize to max 800x800 for preview while preserving aspect ratio
+    max_size = (800, 800)
+    pil_preview = pil_img.copy()
+    pil_preview.thumbnail(max_size, Image.LANCZOS)
+
+    tk_img = ImageTk.PhotoImage(pil_preview)
+
+    panel = tk.Label(root, image=tk_img)
+    panel.image = tk_img  # keep reference
+    panel.pack(padx=10, pady=(10, 4))
+
+    # Show resolution label
+    res_text = f"Resolution: {orig_w}×{orig_h}"
+    res_label = tk.Label(root, text=res_text, font=("TkDefaultFont", 10))
+    res_label.pack(pady=(0, 8))
+
+    # Buttons frame
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(pady=6)
+
+    yes_btn = tk.Button(
+        btn_frame, text="✅ Use this artwork", width=18, command=approve
+    )
+    yes_btn.pack(side="left", padx=6)
+
+    no_btn = tk.Button(btn_frame, text="❌ Skip", width=12, command=reject)
+    no_btn.pack(side="right", padx=6)
+
+    # Keyboard shortcuts
+    root.bind("<Return>", approve)
+    root.bind("<KP_Enter>", approve)
+    root.bind("<Escape>", reject)
+
+    # Center the window
+    try:
+        root.update_idletasks()
+        w = root.winfo_width()
+        h = root.winfo_height()
+        ws = root.winfo_screenwidth()
+        hs = root.winfo_screenheight()
+        x = (ws // 2) - (w // 2)
+        y = (hs // 2) - (h // 2)
+        root.geometry(f"+{x}+{y}")
+    except Exception:
+        pass
+
+    # Wait until the popup is closed (blocking)
+    root.mainloop()
+
+    # Attempt to give focus back to console (platform-specific)
+    try:
+        root.quit()
+        root.destroy()
+    except Exception:
+        pass
+
+    return decision["value"] is True
+
+
 def select_image_from_candidates(
     urls: List[str],
 ) -> Tuple[Optional[str], Optional[bytes], Optional[str]]:
@@ -179,19 +296,13 @@ def select_image_from_candidates(
     for url, content, (w, h), mime in candidates:
         logger.info("🖼️ Candidate: %s (%dx%d)", url, w, h)
         try:
-            img = Image.open(io.BytesIO(content))
-            img.show()
-
-            print("\n")
-            choice = input("👉 Use this artwork? (y/n): ").strip().lower()
-            print("\n")
-
-            # Close the image window
-            img.close()
-
-            if choice == "y":
+            # Use Tkinter preview window with Yes / No buttons
+            approved = preview_with_tkinter(content)
+            if approved:
+                logger.info("✅ User approved artwork: %s", url)
                 return url, content, mime
-
+            else:
+                logger.info("⏭️ User skipped artwork: %s", url)
         except Exception as exc:
             logger.warning("❌ Could not preview image %s: %s", url, exc)
 
@@ -395,7 +506,7 @@ PROVIDER_MAP = {
 
 
 def search_artwork(query: str) -> Tuple[Optional[str], Optional[bytes], Optional[str]]:
-    if query in cache:
+    if config.get("USE_CACHE", True) and query in cache:
         cached_url = cache[query]
         logger.info("💾 Using cached artwork for: %s", query)
         res = fetch_image(cached_url)
@@ -418,8 +529,9 @@ def search_artwork(query: str) -> Tuple[Optional[str], Optional[bytes], Optional
         chosen_url, image_bytes, mime = select_image_from_candidates(urls)
         if chosen_url and image_bytes:
             logger.info("✅ Artwork selected via %s", name)
-            cache[query] = chosen_url
-            save_cache()
+            if config.get("USE_CACHE", True):  # ✅ save only if enabled
+                cache[query] = chosen_url
+                save_cache()
             return chosen_url, image_bytes, mime
 
     logger.info("❌ No approved artwork found from any provider for: %s", query)

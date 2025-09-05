@@ -11,6 +11,7 @@
     "MIN_RESOLUTION": 500,
     "REQUIRE_SQUARE": true,
     "SKIP_EXISTING": true,
+    "USE_CACHE": true,
     "PROCESSED_DIR": "Processed",
     "UNPROCESSED_DIR": "Unprocessed",
     "FILE_ACTION": "copy",
