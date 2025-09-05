@@ -50,12 +50,14 @@ DEFAULT_CONFIG = {
     ],
     "MIN_RESOLUTION": 500,
     "REQUIRE_SQUARE": True,
-    "SKIP_EXISTING": True,
+    "SKIP_PROCESSED": True,
     "PROCESSED_DIR": "Processed",
     "UNPROCESSED_DIR": "Unprocessed",
     "FILE_ACTION": "copy",  # "copy" or "move"
     "GOOGLE_API_KEY": "",
     "GOOGLE_CX_ID": "",
+    "GOOGLE_MAX_RESULTS": 30,
+    "GOOGLE_MAX_WORKERS": 3,
     "DISCOGS_TOKEN": "",
     "SPOTIFY_CLIENT_ID": "",
     "SPOTIFY_CLIENT_SECRET": "",
@@ -313,7 +315,18 @@ def select_image_from_candidates(
 # ============== PROVIDERS ==============
 
 
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
 def provider_google(query: str) -> List[str]:
+    """
+    Threaded Google CSE provider:
+    - Reads GOOGLE_MAX_RESULTS and GOOGLE_MAX_WORKERS from config
+    - Tries sizes in descending order and pages up to what's necessary
+    - Fetches pages in parallel (bounded by GOOGLE_MAX_WORKERS)
+    - Uses image metadata (width/height) when available to stop early
+    """
     key = config.get("GOOGLE_API_KEY")
     cx = config.get("GOOGLE_CX_ID")
     if not key or not cx:
@@ -321,19 +334,136 @@ def provider_google(query: str) -> List[str]:
             "🔍 Google provider skipped (missing GOOGLE_API_KEY/GOOGLE_CX_ID)."
         )
         return []
-    try:
-        from googleapiclient.discovery import build
 
-        service = build("customsearch", "v1", developerKey=key)
-        res = (
-            service.cse()
-            .list(q=query, cx=cx, searchType="image", imgSize="LARGE", num=10)
-            .execute()
-        )
-        items = res.get("items", [])
-        urls = [it["link"] for it in items if it.get("link")]
-        logger.debug("🔍 Google returned %d results for query: %s", len(urls), query)
-        return urls
+    max_results_cfg = int(config.get("GOOGLE_MAX_RESULTS", 30))
+    max_workers = int(config.get("GOOGLE_MAX_WORKERS", 3))
+    max_results = min(max(1, max_results_cfg), 100)
+    min_res = int(
+        config.get("MIN_RESOLUTION", DEFAULT_CONFIG.get("MIN_RESOLUTION", 500))
+    )
+
+    sizes = ["XLARGE", "LARGE"]
+    page_size = 10
+    gathered: List[str] = []
+    seen = set()
+    valid_count = 0  # number of metadata-validated items collected
+
+    def fetch_page(img_size: str, start_index: int):
+        """
+        Fetch one page of results for img_size at start_index.
+        Returns list of items (raw JSON) or empty list on error.
+        Build the service inside the worker to avoid sharing client across threads.
+        """
+        try:
+            from googleapiclient.discovery import build
+
+            service = build(
+                "customsearch", "v1", developerKey=key
+            )  # pylint: disable=no-member
+            res = (
+                service.cse()
+                .list(
+                    q=query,
+                    cx=cx,
+                    searchType="image",
+                    imgSize=img_size,
+                    num=page_size,
+                    start=start_index,
+                )
+                .execute()
+            )
+            return res.get("items", []) or []
+        except Exception as exc:
+            logger.warning(
+                "🔍 Google page fetch error (size=%s start=%d): %s",
+                img_size,
+                start_index,
+                exc,
+            )
+            return []
+
+    # Outer loop sizes — but we will submit page fetch jobs in batches per size
+    try:
+        for img_size in sizes:
+            if valid_count >= max_results:
+                break
+
+            # estimate how many pages we might need (cap at 10 pages per size)
+            pages_needed = (max_results + page_size - 1) // page_size
+            pages_needed = min(
+                pages_needed, 10
+            )  # don't try more than ~10 pages per size
+
+            # Build list of start indices for this size: 1, 11, 21, ...
+            starts = [1 + (i * page_size) for i in range(pages_needed)]
+
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(fetch_page, img_size, s): s for s in starts}
+
+                for fut in as_completed(futures):
+                    items = fut.result()
+                    if not items:
+                        continue
+
+                    # iterate items in returned order
+                    for it in items:
+                        link = it.get("link")
+                        if not link or link in seen:
+                            continue
+
+                        seen.add(link)
+                        gathered.append(link)
+
+                        # use Google image metadata when present
+                        img_meta = it.get("image", {}) or {}
+                        try:
+                            w = (
+                                int(img_meta.get("width"))
+                                if img_meta.get("width")
+                                else None
+                            )
+                            h = (
+                                int(img_meta.get("height"))
+                                if img_meta.get("height")
+                                else None
+                            )
+                        except Exception:
+                            w = h = None
+
+                        if w and h and w >= min_res and h >= min_res:
+                            valid_count += 1
+
+                        # stop conditions:
+                        if valid_count >= max_results:
+                            break
+                        # safety: if we have gathered plenty of items (even without metadata), stop to avoid huge results
+                        if len(gathered) >= max_results * 2:
+                            break
+
+                    logger.debug(
+                        "🔍 Google(size=%s) batch returned %d items (gathered=%d, valid=%d)",
+                        img_size,
+                        len(items),
+                        len(gathered),
+                        valid_count,
+                    )
+
+                    if valid_count >= max_results or len(gathered) >= max_results * 2:
+                        break
+
+                    # polite tiny sleep to avoid bursts when many futures complete quickly
+                    time.sleep(0.1)
+
+            # after finishing this size, check stop condition
+            if valid_count >= max_results:
+                break
+
+            # small gap before trying next size
+            time.sleep(0.2)
+
+        # Return up to max_results deduplicated urls
+        return gathered[:max_results]
+
     except Exception as exc:
         logger.warning("🔍 ❌ Google provider error for query %s: %s", query, exc)
         return []
@@ -454,15 +584,32 @@ def provider_spotify(query: str) -> List[str]:
 
 
 def provider_soundcloud(query: str) -> List[str]:
+    """
+    Primary: query SoundCloud API using SOUNDCLOUD_CLIENT_ID (if present).
+    Fallback: if no client id is configured, use Google CSE restricted to site:soundcloud.com.
+    """
     cid = config.get("SOUNDCLOUD_CLIENT_ID")
     if not cid:
-        logger.debug("☁️ SoundCloud provider skipped (missing client id).")
-        return []
+        logger.debug(
+            "☁️ SoundCloud client id missing; falling back to Google (site:soundcloud.com) for query: %s",
+            query,
+        )
+        try:
+            # Reuse provider_google to search only within soundcloud.com
+            return provider_google(f"{query} site:soundcloud.com")
+        except Exception as exc:
+            logger.warning(
+                "☁️ ❌ SoundCloud → Google fallback error for query %s: %s", query, exc
+            )
+            return []
+
+    # If we have a client id, use the SoundCloud API as before
     try:
         r = requests.get(
             "https://api.soundcloud.com/tracks",
             params={"q": query, "client_id": cid, "limit": 5},
             timeout=10,
+            headers={"User-Agent": USER_AGENT},
         )
         r.raise_for_status()
         tracks = r.json()
@@ -682,7 +829,7 @@ def main():
         print("\n")
         src_path = os.path.join(folder, fname)
 
-        if config.get("SKIP_EXISTING", True):
+        if config.get("SKIP_PROCESSED", True):
             # if os.path.exists(os.path.join(processed_dir, fname)) or os.path.exists(
             #     os.path.join(unprocessed_dir, fname)
             # ):
@@ -805,6 +952,7 @@ def main():
 
         logger.info("📊 Progress: %d/%d files completed\n", i, total)
 
+    print("\n")
     logger.info("📋 ===== SUMMARY =====")
     logger.info("📊 Total files: %d", total)
     logger.info("⏭️ Skipped (already processed): %d", skipped)
