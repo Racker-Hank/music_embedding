@@ -1,0 +1,23 @@
+{
+    "LOG_LEVEL": "INFO",
+    "ENABLED_PROVIDERS": [
+        "juno",
+        "discogs",
+        "itunes",
+        "spotify",
+        "soundcloud",
+        "google"
+    ],
+    "MIN_RESOLUTION": 500,
+    "REQUIRE_SQUARE": true,
+    "SKIP_EXISTING": true,
+    "PROCESSED_DIR": "Processed",
+    "UNPROCESSED_DIR": "Unprocessed",
+    "FILE_ACTION": "copy",
+    "GOOGLE_API_KEY": "",
+    "GOOGLE_CX_ID": "",
+    "DISCOGS_TOKEN": "",
+    "SPOTIFY_CLIENT_ID": "",
+    "SPOTIFY_CLIENT_SECRET": "",
+    "SOUNDCLOUD_CLIENT_ID": ""
+}
