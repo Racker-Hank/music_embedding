@@ -134,6 +134,86 @@ def save_cache():
 # ============== HELPERS ==============
 
 
+def resolve_output_path(path_value: str, base_folder: str) -> str:
+    """
+    Resolve an output path value from config/env.
+    - If path_value is an absolute path, expand and return it.
+    - Otherwise, return a path relative to base_folder.
+    """
+    if not path_value:
+        # fallback to base folder if empty
+        return base_folder
+
+    # Expand environment variables and user home (~)
+    expanded = os.path.expanduser(os.path.expandvars(str(path_value)))
+
+    # If user provided an absolute path, use it directly
+    if os.path.isabs(expanded):
+        return os.path.normpath(expanded)
+
+    # Otherwise resolve relative to the script/exe folder
+    return os.path.normpath(os.path.join(base_folder, expanded))
+
+
+def validate_and_normalize_output_paths(
+    processed_dir: str, unprocessed_dir: str
+) -> Tuple[bool, str, str]:
+    """
+    Validate that processed_dir and unprocessed_dir are distinct and do not overlap.
+    Returns (ok, processed_abs, unprocessed_abs).
+    - ok == True  -> processed_abs and unprocessed_abs are normalized absolute paths.
+    - ok == False -> validation failed and an error has been logged; returned paths are empty strings.
+    """
+    try:
+        proc_abs = os.path.abspath(os.path.normpath(processed_dir))
+        unp_abs = os.path.abspath(os.path.normpath(unprocessed_dir))
+        proc_norm = os.path.normcase(proc_abs)
+        unp_norm = os.path.normcase(unp_abs)
+    except Exception as exc:
+        logger.error(
+            "📁 Error normalizing paths %s and %s: %s",
+            processed_dir,
+            unprocessed_dir,
+            exc,
+        )
+        return False, "", ""
+
+    # Exact same path check
+    if proc_norm == unp_norm:
+        logger.error(
+            "❌ PROCESSED_DIR and UNPROCESSED_DIR resolve to the same path: %s. "
+            "Please configure distinct directories in conf/config.json or .env.",
+            proc_abs,
+        )
+        return False, "", ""
+
+    # Check for parent/child overlap: if one is ancestor of the other
+    try:
+        common = os.path.commonpath([proc_abs, unp_abs])
+        common_norm = os.path.normcase(os.path.normpath(common))
+        if common_norm == proc_norm or common_norm == unp_norm:
+            logger.error(
+                "❌ PROCESSED_DIR (%s) and UNPROCESSED_DIR (%s) overlap (one is inside the other). "
+                "This can cause files to be mis-categorized. Please use distinct, non-overlapping paths.",
+                proc_abs,
+                unp_abs,
+            )
+            return False, "", ""
+    except ValueError:
+        # On Windows different-drives may raise ValueError; that's fine — they don't overlap.
+        pass
+    except Exception as exc:
+        # Unexpected failure determining overlap — warn and fail safe
+        logger.warning(
+            "⚠️ Could not determine path overlap between %s and %s (%s); continuing with caution.",
+            proc_abs,
+            unp_abs,
+            exc,
+        )
+
+    return True, proc_abs, unp_abs
+
+
 def clean_query(filename: str) -> str:
     name = os.path.splitext(filename)[0]
     name = name.replace("_", " ").replace("-", " ")
@@ -690,12 +770,30 @@ def transfer_original_post_failure(
 
 
 def main():
-    # folder = os.path.dirname(os.path.abspath(__file__))
     logger.info("📂 Working folder: %s", folder)
-    processed_dir = os.path.join(folder, str(config["PROCESSED_DIR"]))
-    unprocessed_dir = os.path.join(folder, str(config["UNPROCESSED_DIR"]))
-    os.makedirs(processed_dir, exist_ok=True)
-    os.makedirs(unprocessed_dir, exist_ok=True)
+
+    raw_processed = config.get("PROCESSED_DIR", DEFAULT_CONFIG["PROCESSED_DIR"])
+    raw_unprocessed = config.get("UNPROCESSED_DIR", DEFAULT_CONFIG["UNPROCESSED_DIR"])
+
+    processed_dir = resolve_output_path(raw_processed, folder)
+    unprocessed_dir = resolve_output_path(raw_unprocessed, folder)
+
+    ok, processed_abs, unprocessed_abs = validate_and_normalize_output_paths(
+        processed_dir, unprocessed_dir
+    )
+    if not ok:
+        return
+
+    # Create folders if they don't exist
+    try:
+        os.makedirs(processed_abs, exist_ok=True)
+        os.makedirs(unprocessed_abs, exist_ok=True)
+    except Exception as exc:
+        logger.error("📁 Could not create output directories: %s", exc)
+        return
+
+    logger.info("📁 Processed directory: %s", processed_abs)
+    logger.info("📁 Unprocessed directory: %s", unprocessed_abs)
 
     audio_files = [
         f for f in os.listdir(folder) if f.lower().endswith((".mp3", ".wav"))
@@ -719,9 +817,6 @@ def main():
         src_path = os.path.join(folder, fname)
 
         if config.get("SKIP_EXISTING", True):
-            # if os.path.exists(os.path.join(processed_dir, fname)) or os.path.exists(
-            #     os.path.join(unprocessed_dir, fname)
-            # ):
             if os.path.exists(os.path.join(processed_dir, fname)):
                 logger.info("⏭️ Skipping already processed: %s", fname)
                 logger.info("📊 Progress: %d/%d files completed", i, total)
@@ -842,6 +937,8 @@ def main():
         logger.info("📊 Progress: %d/%d files completed\n", i, total)
 
     logger.info("📋 ===== SUMMARY =====")
+    logger.info("📁 Processed directory: %s", processed_abs)
+    logger.info("📁 Unprocessed directory: %s", unprocessed_abs)
     logger.info("📊 Total files: %d", total)
     logger.info("⏭️ Skipped (already processed): %d", skipped)
     logger.info("✅ Successfully processed: %d", success)
