@@ -509,6 +509,24 @@ def provider_soundcloud(query: str) -> List[str]:
         return []
 
 
+def provider_zing(query: str) -> List[str]:
+    """
+    Zing provider (fallback via Google site search).
+
+    Since Zing (zingmp3.vn) doesn't offer a simple public artwork API for this use,
+    we reuse the Google provider but restrict results to site:zingmp3.vn so that
+    Google returns images/pages hosted on Zing (often including og:image artwork).
+    """
+    try:
+        logger.debug("🎵 Zing provider: searching Zing via Google for query: %s", query)
+        # Reuse provider_google (will return image URLs). provider_google handles
+        # paging/sizing/validation logic you already implemented.
+        return provider_google(f"{query} site:zingmp3.vn")
+    except Exception as exc:
+        logger.warning("🎵 ❌ Zing provider error for query %s: %s", query, exc)
+        return []
+
+
 PROVIDER_MAP = {
     "google": provider_google,
     "itunes": provider_itunes,
@@ -516,6 +534,7 @@ PROVIDER_MAP = {
     "juno": provider_juno,
     "spotify": provider_spotify,
     "soundcloud": provider_soundcloud,
+    "zing": provider_zing,
 }
 
 
