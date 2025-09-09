@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     ],
     "MIN_RESOLUTION": 500,
     "REQUIRE_SQUARE": True,
-    "SKIP_EXISTING": True,
+    "SKIP_PROCESSED": True,
     "PROCESSED_DIR": "Processed",
     "UNPROCESSED_DIR": "Unprocessed",
     "FILE_ACTION": "copy",  # "copy" or "move"
@@ -816,7 +816,7 @@ def main():
         print("\n")
         src_path = os.path.join(folder, fname)
 
-        if config.get("SKIP_EXISTING", True):
+        if config.get("SKIP_PROCESSED", True):
             if os.path.exists(os.path.join(processed_dir, fname)):
                 logger.info("⏭️ Skipping already processed: %s", fname)
                 logger.info("📊 Progress: %d/%d files completed", i, total)
