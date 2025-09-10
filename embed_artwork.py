@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import io
 import json
 import logging
@@ -212,6 +213,64 @@ def validate_and_normalize_output_paths(
         )
 
     return True, proc_abs, unp_abs
+
+
+def _safe_move(src: str, dst: str) -> bool:
+    """
+    Move src -> dst safely across filesystems.
+    - Try os.replace() first (fast/atomic on same filesystem).
+    - If that fails (e.g. cross-device EXDEV), try shutil.move() which does copy+remove.
+    - If that fails, try explicit shutil.copy2() then os.remove().
+    Returns True on success, False otherwise.
+    """
+    try:
+        # Ensure destination directory exists
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+    except Exception as exc:
+        logger.debug("📁 Could not create destination directory for %s: %s", dst, exc)
+
+    try:
+        os.replace(src, dst)
+        return True
+    except OSError as exc:
+        # Cross-device link or other OS-level error -> fallback
+        if getattr(exc, "errno", None) == errno.EXDEV:
+            logger.debug(
+                "🔁 Cross-device move detected, falling back to shutil.move: %s -> %s",
+                src,
+                dst,
+            )
+        else:
+            logger.debug(
+                "🔁 os.replace failed (%s); trying shutil.move for %s -> %s",
+                exc,
+                src,
+                dst,
+            )
+
+        try:
+            shutil.move(src, dst)
+            return True
+        except Exception as exc2:
+            logger.warning("⚠️ shutil.move failed for %s -> %s: %s", src, dst, exc2)
+            # Last-resort: copy2 then remove
+            try:
+                shutil.copy2(src, dst)
+                try:
+                    os.remove(src)
+                except Exception as rm_exc:
+                    logger.warning(
+                        "⚠️ copied but failed to remove source %s: %s", src, rm_exc
+                    )
+                return True
+            except Exception as exc3:
+                logger.error(
+                    "❌ Final fallback copy2 failed for %s -> %s: %s", src, dst, exc3
+                )
+                return False
+    except Exception as exc:
+        logger.error("❌ Unexpected error moving %s -> %s: %s", src, dst, exc)
+        return False
 
 
 def clean_query(filename: str) -> str:
@@ -727,13 +786,21 @@ def transfer_original_post_success(
     basename = os.path.basename(src_path)
     if action == "copy":
         return True, None
+
     # action == move
     try:
         originals_dir = os.path.join(processed_dir, "originals")
         os.makedirs(originals_dir, exist_ok=True)
         dst = os.path.join(originals_dir, basename)
-        os.replace(src_path, dst)
-        return True, dst
+        ok = _safe_move(src_path, dst)
+        if ok:
+            return True, dst
+        logger.error(
+            "📁 ❌ Move original to processed/originals failed for %s -> %s",
+            src_path,
+            dst,
+        )
+        return False, None
     except Exception as exc:
         logger.error(
             "📁 ❌ Move original to processed/originals failed for %s: %s",
@@ -755,10 +822,16 @@ def transfer_original_post_failure(
     dst = os.path.join(unprocessed_dir, basename)
     try:
         if action == "move":
-            os.replace(src_path, dst)
+            ok = _safe_move(src_path, dst)
+            if ok:
+                return True, dst
+            logger.error(
+                "📁 ❌ Failed to move original to Unprocessed: %s -> %s", src_path, dst
+            )
+            return False, None
         else:
             shutil.copy2(src_path, dst)
-        return True, dst
+            return True, dst
     except Exception as exc:
         logger.error(
             "📁 ❌ Transfer to Unprocessed failed for %s -> %s: %s", src_path, dst, exc
