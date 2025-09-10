@@ -6,11 +6,34 @@ Simple tool to find album art for **MP3/WAV** files and embed it into the tracks
 
 ## ✨ Features
 
--  🎧 Music-focused providers: iTunes, Discogs, Juno, Spotify, SoundCloud, Google CSE (configurable order)
--  💾 Caching of chosen artwork (`data/artwork_cache.json`)
--  📂 Copies/moves originals to `Processed/` / `Unprocessed/` depending on result and config
--  ⚙️ Configurable via `conf/config.json` and overrideable via `.env` (recommended for secrets)
--  📝 Logging with configurable level, filename and line number
+-  🎧 **Audio support**: MP3 & WAV
+-  🌐 **Multi-provider artwork search**:
+   -  Google (size-ordered, paginated, configurable max results/workers)
+   -  iTunes
+   -  Discogs
+   -  JunoDownload
+   -  Spotify
+   -  SoundCloud (API if client ID available, fallback to Google `site:soundcloud.com`)
+   -  Zing MP3
+-  🖼 **Interactive preview**:
+   -  Shows resolution
+   -  Approve with **Enter / ✅ button**
+   -  Skip with **Esc / ❌ button**
+-  💾 **Artwork caching**:
+   -  Saves approved artwork in `data/artwork_cache.json`
+   -  Toggleable via `USE_CACHE=true/false`
+-  📂 **Organized outputs**:
+   -  ✅ `Processed/` → tracks with artwork
+   -  ❌ `Unprocessed/` → no artwork / failed
+   -  Originals optionally moved into `Processed/originals/` if `FILE_ACTION=move`
+-  ⚙️ **Flexible configuration**:
+   -  Defaults in `conf/config.json`
+   -  Override in `.env` (recommended for secrets & preferences)
+   -  Supports absolute paths for `PROCESSED_DIR` and `UNPROCESSED_DIR`
+   -  Validation ensures processed/unprocessed paths are distinct and non-overlapping
+-  📝 **Logging**:
+   -  File + line numbers
+   -  Customizable log level via config/env
 
 ---
 
